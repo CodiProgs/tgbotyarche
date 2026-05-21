@@ -52,7 +52,6 @@ async def init_db():
             )
         """)
 
-        # 🔧 ОБНОВЛЕННАЯ таблица контента с поддержкой медиа
         await db.execute("""
             CREATE TABLE IF NOT EXISTS content (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +114,6 @@ async def deactivate_user(user_id: int):
         await db.commit()
 
 
-# 🔧 ОБНОВЛЕННАЯ функция добавления контента с медиа
 async def add_content(text: str = None, media_type: str = "text", file_id: str = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COALESCE(MAX(position), 0) FROM content") as cursor:
@@ -129,7 +127,6 @@ async def add_content(text: str = None, media_type: str = "text", file_id: str =
         return next_pos
 
 
-# 🔧 ОБНОВЛЕННАЯ функция получения контента
 async def get_content_by_position(pos: int):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -145,7 +142,6 @@ async def get_content_by_position(pos: int):
             return None
 
 
-# 🔧 ОБНОВЛЕННАЯ функция получения всех постов
 async def get_all_content():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -163,17 +159,14 @@ async def delete_content_by_position(pos: int) -> bool:
         return cursor.rowcount > 0
 
 
-# 🔧 ОБНОВЛЕННАЯ функция редактирования с поддержкой медиа
 async def edit_content_by_position(pos: int, text: str = None, media_type: str = None, file_id: str = None) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         if text is not None and media_type is not None and file_id is not None:
-            # Полное обновление
             await db.execute(
                 "UPDATE content SET text = ?, media_type = ?, file_id = ? WHERE position = ?",
                 (text, media_type, file_id, pos)
             )
         elif text is not None:
-            # Только текст
             await db.execute("UPDATE content SET text = ? WHERE position = ?", (text, pos))
         await db.commit()
         return True
@@ -215,10 +208,11 @@ async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     count = await get_content_count()
     h, m = await get_schedule()
+    # ✅ ИЗМЕНЕНО: "ежедневно" вместо "Пн/Ср/Пт"
     await message.answer(
         f"✅ Вы подписаны!\n"
         f"Вас ждёт {count} сообщений.\n"
-        f"Рассылка: Пн/Ср/Пт в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).\n"
+        f"Рассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).\n"
         f"Чтобы остановить: /stop"
     )
 
@@ -247,29 +241,25 @@ async def cmd_add_user(message: types.Message):
         await message.answer("⚠️ Укажите числовой ID пользователя")
 
 
-# 🔧 ОБНОВЛЕННАЯ команда добавления поста с поддержкой медиа
 @dp.message(Command("add_post"))
 async def cmd_add_post(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     
-    # 🔧 ИСПРАВЛЕНИЕ: получаем текст из caption (для медиа) или text (для обычных сообщений)
+    # ✅ ИСПРАВЛЕНИЕ: текст может быть в caption (для медиа) или text (для обычных сообщений)
     raw_text = message.caption if message.caption else message.text
     
     text = None
     if raw_text:
         parts = raw_text.split(maxsplit=1)
-        # Проверяем, что есть хотя бы команда и текст после неё
         if len(parts) > 1 and parts[0].lower().startswith('/add_post'):
             text = parts[1].strip()
         elif len(parts) > 0 and not parts[0].lower().startswith('/add_post'):
-            # Если команда не в начале (редко, но бывает)
             text = raw_text.strip()
     
     media_type = "text"
     file_id = None
     
-    # Определяем тип медиа
     if message.photo:
         media_type = "photo"
         file_id = message.photo[-1].file_id
@@ -286,7 +276,6 @@ async def cmd_add_post(message: types.Message):
         media_type = "voice"
         file_id = message.voice.file_id
     
-    # Если только медиа без текста
     if not text and media_type != "text":
         text = None
     
@@ -296,6 +285,7 @@ async def cmd_add_post(message: types.Message):
     emoji = media_emoji.get(media_type, "📝")
     
     await message.answer(f"{emoji} Пост #{pos} добавлен ({media_type})")
+
 
 @dp.message(Command("posts"))
 async def cmd_list_posts(message: types.Message):
@@ -334,13 +324,11 @@ async def cmd_delete_post(message: types.Message):
         await message.answer(f"❌ Пост #{pos} не найден")
 
 
-# 🔧 ОБНОВЛЕННАЯ команда редактирования
 @dp.message(Command("edit_post"))
 async def cmd_edit_post(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     
-    # 🔧 Получаем текст из caption или text
     raw_text = message.caption if message.caption else message.text
     
     new_text = None
@@ -371,6 +359,7 @@ async def cmd_edit_post(message: types.Message):
             await message.answer("📝 Использование:\n/edit_post <номер> <новый текст>")
     else:
         await message.answer("📝 Использование:\n/edit_post <номер> <новый текст>")
+
 
 @dp.message(Command("schedule"))
 async def cmd_schedule(message: types.Message):
@@ -413,10 +402,8 @@ async def cmd_stats(message: types.Message):
     )
 
 
-# 🔧 ОБНОВЛЕННАЯ тестовая отправка
 @dp.message(Command("test_send"))
 async def cmd_test_send(message: types.Message):
-    """Мгновенная тестовая отправка следующего поста"""
     if not is_admin(message.from_user.id):
         return
     
@@ -439,9 +426,7 @@ async def cmd_test_send(message: types.Message):
         await message.answer("❌ Пост не найден")
 
 
-# 🔧 НОВАЯ функция отправки медиа
 async def send_media_message(user_id: int, content: dict, test_mode: bool = False):
-    """Отправляет сообщение с учётом типа медиа"""
     text = content.get("text")
     media_type = content.get("media_type", "text")
     file_id = content.get("file_id")
@@ -460,18 +445,15 @@ async def send_media_message(user_id: int, content: dict, test_mode: bool = Fals
         elif media_type == "voice" and file_id:
             await bot.send_voice(user_id, voice=file_id, caption=prefix + (text or ""))
         else:
-            # Обычный текст
             await bot.send_message(user_id, prefix + (text or ""), parse_mode="Markdown" if test_mode else None)
     except Exception as e:
         logging.error(f"❌ Ошибка отправки медиа {media_type} для {user_id}: {e}")
-        # Фолбэк на текст
         if text:
             await bot.send_message(user_id, prefix + text)
 
 
 @dp.message(Command("debug"))
 async def cmd_debug(message: types.Message):
-    """Полная отладка для админа"""
     if not is_admin(message.from_user.id):
         return
     
@@ -486,10 +468,11 @@ async def cmd_debug(message: types.Message):
     
     weekday_map = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
     
+    # ✅ ИЗМЕНЕНО: "ежедневно" вместо "Пн/Ср/Пт"
     await message.answer(
         f"🔍 ОТЛАДКА:\n"
         f"• Сейчас: {now.strftime('%H:%M %d.%m.%Y')} ({weekday_map[now.weekday()]})\n"
-        f"• Рассылка: Пн/Ср/Пт в {h:02d}:{m:02d} {SCHEDULE_TIMEZONE}\n"
+        f"• Рассылка: ежедневно в {h:02d}:{m:02d} {SCHEDULE_TIMEZONE}\n"
         f"• Ваш шаг: {my_step}\n"
         f"• Постов в БД: {await get_content_count()}\n"
         f"• Задач в планировщике: {len(jobs)}\n" +
@@ -499,21 +482,14 @@ async def cmd_debug(message: types.Message):
     )
 
 
-# 🔧 ОБНОВЛЕННАЯ функция рассылки
+# ✅ ИЗМЕНЕНО: убрана проверка дня недели — рассылка каждый день
 async def send_scheduled_content():
     logging.info("🔔 [JOB START] Запуск рассылки")
-    
-    now = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE))
-    weekday = now.weekday()
-    
-    if weekday not in [0, 2, 4]:
-        logging.info(f"⏭️ Сегодня {['Вс','Пн','Вт','Ср','Чт','Пт','Сб'][weekday]}, пропускаем")
-        return
     
     users = await get_active_users()
     total = await get_content_count()
     
-    logging.info(f"📊 Пользователей: {len(users)}, постов: {total}, день: {weekday}")
+    logging.info(f"📊 Пользователей: {len(users)}, постов: {total}")
     
     if total == 0:
         logging.warning("⚠️ Нет контента")
@@ -541,6 +517,7 @@ async def send_scheduled_content():
     logging.info(f"✅ [JOB END] Отправлено: {sent_count}")
 
 
+# ✅ ИЗМЕНЕНО: CronTrigger без day_of_week = каждый день
 async def setup_scheduler():
     hour, minute = await get_schedule()
     scheduler.remove_all_jobs()
@@ -548,7 +525,7 @@ async def setup_scheduler():
     scheduler.add_job(
         send_scheduled_content,
         CronTrigger(
-            day_of_week="mon,wed,fri",
+            # ✅ Убран day_of_week — задача выполняется КАЖДЫЙ день
             hour=hour,
             minute=minute,
             timezone=ZoneInfo(SCHEDULE_TIMEZONE),
@@ -558,7 +535,7 @@ async def setup_scheduler():
         replace_existing=True,
         misfire_grace_time=3600
     )
-    logging.info(f"⏰ Планировщик: Пн/Ср/Пт в {hour:02d}:{minute:02d} {SCHEDULE_TIMEZONE}")
+    logging.info(f"⏰ Планировщик: ежедневно в {hour:02d}:{minute:02d} {SCHEDULE_TIMEZONE}")
 
 
 async def on_startup():
