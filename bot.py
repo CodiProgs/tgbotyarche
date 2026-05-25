@@ -40,15 +40,23 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# 🔘 Постоянная клавиатура для всех пользователей
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="▶️ Начать"), KeyboardButton(text="⏹️ Закончить")]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=False,
-    input_field_placeholder="Выберите действие"
-)
+
+# 🔘 Динамическая клавиатура: зависит от статуса подписки
+def get_main_keyboard(is_active: bool) -> ReplyKeyboardMarkup:
+    """Возвращает клавиатуру в зависимости от статуса пользователя"""
+    if is_active:
+        # Подписан → только кнопка "Закончить"
+        keyboard = [[KeyboardButton(text="⏹️ Закончить")]]
+    else:
+        # Не подписан → только кнопка "Начать"
+        keyboard = [[KeyboardButton(text="▶️ Начать")]]
+    
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Управление подпиской"
+    )
 
 
 async def init_db():
@@ -105,6 +113,14 @@ async def add_user(user_id: int, username: str = None):
             (user_id, username, user_id)
         )
         await db.commit()
+
+
+async def get_user_status(user_id: int) -> bool:
+    """Проверяет, активен ли пользователь (подписан на рассылку)"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT active FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            result = await cursor.fetchone()
+            return bool(result and result[0])
 
 
 async def get_active_users():
@@ -220,11 +236,12 @@ async def btn_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     count = await get_content_count()
     h, m = await get_schedule()
+    keyboard = get_main_keyboard(is_active=True)  # После подписки показываем только "Закончить"
     await message.answer(
         f"✅ Вы подписаны!\n"
         f"Вас ждёт {count} сообщений.\n"
         f"Рассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
-        reply_markup=MAIN_KEYBOARD
+        reply_markup=keyboard
     )
 
 
@@ -232,9 +249,10 @@ async def btn_start(message: types.Message):
 @dp.message(F.text == "⏹️ Закончить")
 async def btn_stop(message: types.Message):
     await deactivate_user(message.from_user.id)
+    keyboard = get_main_keyboard(is_active=False)  # После отписки показываем только "Начать"
     await message.answer(
         "🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.",
-        reply_markup=MAIN_KEYBOARD
+        reply_markup=keyboard
     )
 
 
@@ -244,11 +262,12 @@ async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     count = await get_content_count()
     h, m = await get_schedule()
+    keyboard = get_main_keyboard(is_active=True)
     await message.answer(
         f"✅ Вы подписаны!\n"
         f"Вас ждёт {count} сообщений.\n"
         f"Рассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
-        reply_markup=MAIN_KEYBOARD
+        reply_markup=keyboard
     )
 
 
@@ -256,23 +275,40 @@ async def cmd_start(message: types.Message):
 @dp.message(F.text == "/stop")
 async def cmd_stop(message: types.Message):
     await deactivate_user(message.from_user.id)
+    keyboard = get_main_keyboard(is_active=False)
     await message.answer(
         "🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.",
-        reply_markup=MAIN_KEYBOARD
+        reply_markup=keyboard
     )
 
 
-# 🔘 Любое текстовое сообщение — показываем клавиатуру (чтобы она "прилипла")
+# 🔘 Любое текстовое сообщение — показываем актуальную клавиатуру
 @dp.message(F.text)
 async def any_text_with_keyboard(message: types.Message):
     # Не отвечаем на команды админа, чтобы не спамить
     if message.text.startswith('/') and is_admin(message.from_user.id):
         return
-    # Если пользователь уже нажал кнопку — обработано выше
+    # Если пользователь нажал кнопку — обработано выше
     if message.text in ["▶️ Начать", "⏹️ Закончить"]:
         return
-    # Просто показываем клавиатуру в ответ на любое сообщение
-    await message.answer("👆 Используйте кнопки ниже:", reply_markup=MAIN_KEYBOARD)
+    
+    # Проверяем статус пользователя и показываем нужную клавиатуру
+    is_active = await get_user_status(message.from_user.id)
+    keyboard = get_main_keyboard(is_active=is_active)
+    
+    # Отправляем подсказку только если пользователь ещё не взаимодействовал с ботом
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users WHERE user_id = ?", (message.from_user.id,)) as c:
+            if (await c.fetchone())[0] == 0:
+                await message.answer(
+                    "👋 Привет! Нажмите «▶️ Начать», чтобы подписаться на рассылку.",
+                    reply_markup=keyboard
+                )
+                return
+    
+    # Для существующих пользователей просто обновляем клавиатуру (без текста, чтобы не спамить)
+    # Используем edit_message_reply_markup, но это сложно с обычными сообщениями
+    # Поэтому просто молча игнорируем обычные сообщения, клавиатура обновится при следующем ответе бота
 
 
 @dp.message(Command("add_user"))
@@ -288,7 +324,8 @@ async def cmd_add_user(message: types.Message):
     if target.isdigit():
         user_id = int(target)
         await add_user(user_id)
-        await message.answer(f"✅ Пользователь {user_id} добавлен в рассылку")
+        keyboard = get_main_keyboard(is_active=True)
+        await message.answer(f"✅ Пользователь {user_id} добавлен в рассылку", reply_markup=keyboard)
     else:
         await message.answer("⚠️ Укажите числовой ID пользователя")
 
@@ -518,17 +555,20 @@ async def cmd_debug(message: types.Message):
             my_step = result[0] if result else None
     
     weekday_map = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
+    is_active = await get_user_status(message.from_user.id)
     
     await message.answer(
         f"🔍 ОТЛАДКА:\n"
         f"• Сейчас: {now.strftime('%H:%M %d.%m.%Y')} ({weekday_map[now.weekday()]})\n"
         f"• Рассылка: ежедневно в {h:02d}:{m:02d} {SCHEDULE_TIMEZONE}\n"
+        f"• Ваш статус: {'✅ Подписан' if is_active else '❌ Не подписан'}\n"
         f"• Ваш шаг: {my_step}\n"
         f"• Постов в БД: {await get_content_count()}\n"
         f"• Задач в планировщике: {len(jobs)}\n" +
         (f"• След. запуск: {jobs[0].next_run_time.astimezone(ZoneInfo(SCHEDULE_TIMEZONE)).strftime('%H:%M %d.%m.%Y')}\n" if jobs else "") +
         f"• ADMIN_IDS: {ADMIN_IDS}\n"
-        f"• Создатель бота: {BOT_TOKEN.split(':')[0] if BOT_TOKEN else 'N/A'}"
+        f"• Создатель бота: {BOT_TOKEN.split(':')[0] if BOT_TOKEN else 'N/A'}",
+        reply_markup=get_main_keyboard(is_active=is_active)
     )
 
 
