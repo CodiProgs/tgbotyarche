@@ -40,106 +40,84 @@ logging.basicConfig(
 )
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())  # ✅ Для FSM
+dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler()
 
 
 # ==================== КЛАВИАТУРЫ ====================
 
 def get_main_keyboard(is_active: bool) -> ReplyKeyboardMarkup:
-    """Клавиатура для обычных пользователей"""
     keyboard = [[KeyboardButton(text="⏹️ Закончить")]] if is_active else [[KeyboardButton(text="▶️ Начать")]]
     return ReplyKeyboardMarkup(
-        keyboard=keyboard,
-        resize_keyboard=True,
-        one_time_keyboard=False,
+        keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False,
         input_field_placeholder="Управление подпиской"
     )
 
 
 def get_admin_keyboard() -> ReplyKeyboardMarkup:
-    """Главная клавиатура администратора"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Добавить пост"), KeyboardButton(text="📋 Все посты")],
             [KeyboardButton(text="✏️ Редактировать"), KeyboardButton(text="🗑️ Удалить пост")],
             [KeyboardButton(text="⏰ Настроить время"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="🔙 Обычное меню")]  # Скрыть админ-кнопки
+            [KeyboardButton(text="🔙 Обычное меню")]
         ],
-        resize_keyboard=True,
-        one_time_keyboard=False
+        resize_keyboard=True, one_time_keyboard=False
     )
 
 
-def get_post_inline_keyboard(posts: list) -> InlineKeyboardMarkup:
-    """Инлайн-кнопки для выбора поста (для редактирования/удаления)"""
+def get_post_list_keyboard(posts: list, mode: str = "edit") -> InlineKeyboardMarkup:
+    """Кнопки выбора поста + предпросмотр"""
     keyboard = []
-    for pos, text, media_type, _ in posts[:10]:  # Показываем первые 10
+    for pos, text, media_type, _ in posts[:10]:
         emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
-        preview = (text or "[без текста]")[:30] + "..."
-        keyboard.append([InlineKeyboardButton(text=f"{emoji} #{pos}: {preview}", callback_data=f"post_{pos}")])
+        preview = (text or "[без текста]")[:25] + "..."
+        # Две кнопки в ряд: выбор поста и предпросмотр
+        keyboard.append([
+            InlineKeyboardButton(text=f"{emoji} #{pos}", callback_data=f"{mode}_{pos}"),
+            InlineKeyboardButton(text="👁️", callback_data=f"preview_{pos}")
+        ])
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def get_edit_options_keyboard(pos: int) -> InlineKeyboardMarkup:
-    """Кнопки выбора: что редактировать в посте"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"edit_text_{pos}")],
         [InlineKeyboardButton(text="🖼️ Заменить медиа", callback_data=f"edit_media_{pos}")],
+        [InlineKeyboardButton(text="👁️ Просмотреть", callback_data=f"preview_{pos}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
     ])
 
 
 def get_confirm_delete_keyboard(pos: int) -> InlineKeyboardMarkup:
-    """Подтверждение удаления"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_{pos}"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")
-        ]
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_{pos}")],
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_back")]
     ])
 
 
-# ==================== FSM ДЛЯ АДМИНА ====================
+# ==================== FSM ====================
 
 class AdminStates(StatesGroup):
-    waiting_for_post_text = State()      # Ждём текст нового поста
-    waiting_for_edit_text = State()      # Ждём новый текст для редактирования
-    waiting_for_media_replace = State()  # Ждём новое медиа для замены
-    waiting_for_schedule_hour = State()  # Настройка времени: час
-    waiting_for_schedule_minute = State() # Настройка времени: минуты
+    waiting_for_post_text = State()
+    waiting_for_edit_text = State()
+    waiting_for_media_replace = State()
+    waiting_for_schedule_hour = State()
+    waiting_for_schedule_minute = State()
 
 
-# ==================== ИНИЦИАЛИЗАЦИЯ БД ====================
+# ==================== БД ====================
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                step INTEGER DEFAULT 1,
-                active INTEGER DEFAULT 1,
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS content (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                text TEXT,
-                media_type TEXT DEFAULT 'text',
-                file_id TEXT,
-                position INTEGER UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+        await db.execute("""CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY, username TEXT, step INTEGER DEFAULT 1,
+            active INTEGER DEFAULT 1, joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS content (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, media_type TEXT DEFAULT 'text',
+            file_id TEXT, position INTEGER UNIQUE NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)""")
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sched_hour', ?)", (DEFAULT_HOUR,))
         await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('sched_min', ?)", (DEFAULT_MINUTE,))
         await db.execute("UPDATE users SET step = MAX(step, 1), active = 1")
@@ -151,9 +129,8 @@ async def init_db():
 
 def is_admin(user_id: int) -> bool:
     try:
-        creator_id = int(BOT_TOKEN.split(":")[0])
-        return user_id in ADMIN_IDS or user_id == creator_id
-    except (ValueError, IndexError):
+        return user_id in ADMIN_IDS or user_id == int(BOT_TOKEN.split(":")[0])
+    except:
         return user_id in ADMIN_IDS
 
 
@@ -161,8 +138,7 @@ async def add_user(user_id: int, username: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO users (user_id, username, step, active) VALUES (?, ?, MAX(1, COALESCE((SELECT step FROM users WHERE user_id = ?), 0)), 1)",
-            (user_id, username, user_id)
-        )
+            (user_id, username, user_id))
         await db.commit()
 
 
@@ -194,11 +170,11 @@ async def deactivate_user(user_id: int):
 async def add_content(text: str = None, media_type: str = "text", file_id: str = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COALESCE(MAX(position), 0) FROM content") as cursor:
-            result = await cursor.fetchone()
-            next_pos = (result[0] or 0) + 1
-        await db.execute("INSERT INTO content (text, media_type, file_id, position) VALUES (?, ?, ?, ?)", (text, media_type, file_id, next_pos))
+            next_pos = (await cursor.fetchone())[0] or 0
+        await db.execute("INSERT INTO content (text, media_type, file_id, position) VALUES (?, ?, ?, ?)",
+                        (text, media_type, file_id, next_pos + 1))
         await db.commit()
-        return next_pos
+        return next_pos + 1
 
 
 async def get_content_by_position(pos: int):
@@ -228,11 +204,13 @@ async def delete_content_by_position(pos: int) -> bool:
 async def edit_content_by_position(pos: int, text: str = None, media_type: str = None, file_id: str = None) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         if text is not None and media_type is not None and file_id is not None:
-            await db.execute("UPDATE content SET text = ?, media_type = ?, file_id = ? WHERE position = ?", (text, media_type, file_id, pos))
+            await db.execute("UPDATE content SET text = ?, media_type = ?, file_id = ? WHERE position = ?",
+                           (text, media_type, file_id, pos))
         elif text is not None:
             await db.execute("UPDATE content SET text = ? WHERE position = ?", (text, pos))
         elif media_type is not None and file_id is not None:
-            await db.execute("UPDATE content SET media_type = ?, file_id = ? WHERE position = ?", (media_type, file_id, pos))
+            await db.execute("UPDATE content SET media_type = ?, file_id = ? WHERE position = ?",
+                           (media_type, file_id, pos))
         await db.commit()
         return True
 
@@ -253,7 +231,7 @@ async def get_schedule():
                 try:
                     if key == 'sched_hour': hour = int(value)
                     elif key == 'sched_min': minute = int(value)
-                except (ValueError, TypeError): pass
+                except: pass
             return hour, minute
     return DEFAULT_HOUR, DEFAULT_MINUTE
 
@@ -274,14 +252,14 @@ async def btn_start(message: types.Message):
     h, m = await get_schedule()
     await message.answer(
         f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\nРассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
-        reply_markup=get_main_keyboard(is_active=True)
-    )
+        reply_markup=get_main_keyboard(is_active=True))
 
 
 @dp.message(F.text == "⏹️ Закончить")
 async def btn_stop(message: types.Message):
     await deactivate_user(message.from_user.id)
-    await message.answer("🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.", reply_markup=get_main_keyboard(is_active=False))
+    await message.answer("🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.",
+                        reply_markup=get_main_keyboard(is_active=False))
 
 
 @dp.message(CommandStart())
@@ -294,8 +272,7 @@ async def cmd_start(message: types.Message):
         h, m = await get_schedule()
         await message.answer(
             f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\nРассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
-            reply_markup=get_main_keyboard(is_active=True)
-        )
+            reply_markup=get_main_keyboard(is_active=True))
 
 
 @dp.message(F.text == "/stop")
@@ -326,7 +303,6 @@ async def admin_list_posts(message: types.Message):
         emoji = media_emoji.get(media_type, "📝")
         preview = (text or "[без текста]")[:60] + ("..." if text and len(text) > 60 else "")
         result += f"{emoji} #{pos}: {preview}\n"
-    
     await message.answer(result, reply_markup=get_admin_keyboard())
 
 
@@ -337,8 +313,42 @@ async def admin_stats(message: types.Message):
         async with db.execute("SELECT COUNT(*) FROM users WHERE active=1") as c: active = (await c.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM content") as c: posts = (await c.fetchone())[0]
         async with db.execute("SELECT AVG(step) FROM users WHERE active=1") as c: avg_step = round((await c.fetchone())[0] or 0, 1)
+    await message.answer(f"📊 Статистика:\n• Активных: {active}\n• Постов: {posts}\n• Средний шаг: {avg_step}",
+                        reply_markup=get_admin_keyboard())
+
+
+# ==================== 🔙 УНИВЕРСАЛЬНАЯ КНОПКА «НАЗАД» ====================
+
+@dp.callback_query(F.data == "admin_back")
+async def admin_back_callback(callback: types.CallbackQuery, state: FSMContext):
+    """✅ Универсальный обработчик кнопки 'Назад' для админа"""
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("❌ Доступ запрещён", show_alert=True)
     
-    await message.answer(f"📊 Статистика:\n• Активных: {active}\n• Постов: {posts}\n• Средний шаг: {avg_step}", reply_markup=get_admin_keyboard())
+    await state.clear()
+    try:
+        await callback.message.edit_text("🔙 Возврат в меню", reply_markup=get_admin_keyboard())
+    except:
+        await callback.message.answer("🔙 Возврат в меню", reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+
+# ==================== 👁️ ПРЕДПРОСМОТР ПОСТА ====================
+
+@dp.callback_query(F.data.startswith("preview_"))
+async def admin_preview_post(callback: types.CallbackQuery):
+    """✅ Показывает пост так, как его увидит обычный пользователь"""
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("❌", show_alert=True)
+    
+    pos = int(callback.data.split("_")[1])
+    content = await get_content_by_position(pos)
+    if not content:
+        return await callback.answer("❌ Пост не найден", show_alert=True)
+    
+    # Отправляем пост БЕЗ префикса "ТЕСТ" — точно как для пользователя
+    await send_media_message(callback.from_user.id, content, test_mode=False)
+    await callback.answer(f"👁️ Пост #{pos} отправлен вам в чат")
 
 
 # ==================== АДМИН: ДОБАВИТЬ ПОСТ ====================
@@ -348,13 +358,11 @@ async def admin_add_post_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     await message.answer(
         "📝 **Добавление поста**\n\n"
-        "Отправьте:\n"
-        "• 📷 Фото, 🎥 Видео или 📄 Файл — с подписью (текстом поста)\n"
+        "Отправьте:\n• 📷 Фото, 🎥 Видео или 📄 Файл — с подписью (текстом поста)\n"
         "• Или просто текст — для обычного сообщения\n\n"
         "Нажмите 🔙 Назад, чтобы отменить",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]])
-    )
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
     await state.set_state(AdminStates.waiting_for_post_text)
 
 
@@ -363,7 +371,8 @@ async def admin_add_post_start(message: types.Message, state: FSMContext):
 async def admin_add_post_cancel(message: types.Message | types.CallbackQuery, state: FSMContext):
     if isinstance(message, types.CallbackQuery): await message.answer()
     await state.clear()
-    await (message.message if isinstance(message, types.CallbackQuery) else message).answer("❌ Отменено", reply_markup=get_admin_keyboard())
+    target = message.message if isinstance(message, types.CallbackQuery) else message
+    await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
 
 @dp.message(AdminStates.waiting_for_post_text)
@@ -389,7 +398,7 @@ async def admin_add_post_save(message: types.Message, state: FSMContext):
     await message.answer(f"{emoji} ✅ Пост #{pos} добавлен!", reply_markup=get_admin_keyboard())
 
 
-# ==================== АДМИН: РЕДАКТИРОВАТЬ ПОСТ ====================
+# ==================== АДМИН: РЕДАКТИРОВАТЬ ====================
 
 @dp.message(F.text == "✏️ Редактировать")
 async def admin_edit_start(message: types.Message):
@@ -397,12 +406,15 @@ async def admin_edit_start(message: types.Message):
     posts = await get_all_content()
     if not posts:
         return await message.answer("📭 Нечего редактировать", reply_markup=get_admin_keyboard())
-    await message.answer("✏️ Выберите пост для редактирования:", reply_markup=get_post_inline_keyboard(posts))
+    await message.answer("✏️ Выберите пост для редактирования:",
+                        reply_markup=get_post_list_keyboard(posts, mode="edit"))
 
 
-@dp.callback_query(F.data.startswith("post_"))
+@dp.callback_query(F.data.startswith("edit_") and not F.data.startswith("edit_text") and not F.data.startswith("edit_media"))
 async def admin_edit_select(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌ Доступ запрещён", show_alert=True)
+    """Выбор поста для редактирования"""
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("❌ Доступ запрещён", show_alert=True)
     
     pos = int(callback.data.split("_")[1])
     content = await get_content_by_position(pos)
@@ -418,21 +430,20 @@ async def admin_edit_select(callback: types.CallbackQuery):
         f"Текст: {preview}{'...' if content['text'] and len(content['text']) > 100 else ''}\n\n"
         f"Что изменить?",
         parse_mode="Markdown",
-        reply_markup=get_edit_options_keyboard(pos)
-    )
+        reply_markup=get_edit_options_keyboard(pos))
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("edit_text_"))
 async def admin_edit_text_start(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌", show_alert=True)
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("❌", show_alert=True)
     pos = int(callback.data.split("_")[2])
     await state.update_data(edit_pos=pos)
     await state.set_state(AdminStates.waiting_for_edit_text)
     await callback.message.edit_text(
         f"✏️ Введите новый текст для поста #{pos}:\n\n🔙 Назад — отменить",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]])
-    )
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
     await callback.answer()
 
 
@@ -442,7 +453,10 @@ async def admin_edit_text_cancel(message: types.Message | types.CallbackQuery, s
     if isinstance(message, types.CallbackQuery): await message.answer()
     await state.clear()
     target = message.message if isinstance(message, types.CallbackQuery) else message
-    await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard()) if isinstance(target, types.Message) else await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
+    if isinstance(target, types.Message):
+        await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard())
+    else:
+        await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
 
 @dp.message(AdminStates.waiting_for_edit_text)
@@ -459,14 +473,14 @@ async def admin_edit_text_save(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("edit_media_"))
 async def admin_edit_media_start(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌", show_alert=True)
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("❌", show_alert=True)
     pos = int(callback.data.split("_")[2])
     await state.update_data(edit_pos=pos)
     await state.set_state(AdminStates.waiting_for_media_replace)
     await callback.message.edit_text(
         f"🖼️ Отправьте новое медиа (фото/видео/файл) для поста #{pos}:\n\n🔙 Назад — отменить",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]])
-    )
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
     await callback.answer()
 
 
@@ -476,7 +490,10 @@ async def admin_edit_media_cancel(message: types.Message | types.CallbackQuery, 
     if isinstance(message, types.CallbackQuery): await message.answer()
     await state.clear()
     target = message.message if isinstance(message, types.CallbackQuery) else message
-    await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard()) if isinstance(target, types.Message) else await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
+    if isinstance(target, types.Message):
+        await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard())
+    else:
+        await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
 
 @dp.message(AdminStates.waiting_for_media_replace)
@@ -494,14 +511,15 @@ async def admin_edit_media_save(message: types.Message, state: FSMContext):
     elif message.voice: media_type, file_id = "voice", message.voice.file_id
     
     if not media_type:
-        return await message.answer("❌ Отправьте фото, видео или файл", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
+        return await message.answer("❌ Отправьте фото, видео или файл",
+                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
     
     await edit_content_by_position(pos, media_type=media_type, file_id=file_id)
     await state.clear()
     await message.answer(f"✅ Медиа поста #{pos} обновлено!", reply_markup=get_admin_keyboard())
 
 
-# ==================== АДМИН: УДАЛИТЬ ПОСТ ====================
+# ==================== АДМИН: УДАЛИТЬ ====================
 
 @dp.message(F.text == "🗑️ Удалить пост")
 async def admin_delete_start(message: types.Message):
@@ -509,17 +527,19 @@ async def admin_delete_start(message: types.Message):
     posts = await get_all_content()
     if not posts:
         return await message.answer("📭 Нечего удалять", reply_markup=get_admin_keyboard())
-    await message.answer("🗑️ Выберите пост для удаления:", reply_markup=get_post_inline_keyboard(posts))
+    await message.answer("🗑️ Выберите пост для удаления:",
+                        reply_markup=get_post_list_keyboard(posts, mode="delete"))
 
 
-@dp.callback_query(F.data.startswith("post_"))
+@dp.callback_query(F.data.startswith("delete_"))
 async def admin_delete_select(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌ Доступ запрещён", show_alert=True)
-    if callback.message.reply_markup and "edit_text" in str(callback.message.reply_markup): return  # Это редактирование
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("❌ Доступ запрещён", show_alert=True)
     
     pos = int(callback.data.split("_")[1])
     content = await get_content_by_position(pos)
-    if not content: return await callback.answer("❌ Пост не найден", show_alert=True)
+    if not content:
+        return await callback.answer("❌ Пост не найден", show_alert=True)
     
     emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(content["media_type"], "📝")
     preview = (content["text"] or "[без текста]")[:100]
@@ -529,14 +549,14 @@ async def admin_delete_select(callback: types.CallbackQuery):
         f"Текст: {preview}{'...' if content['text'] and len(content['text']) > 100 else ''}\n\n"
         f"⚠️ После удаления номера последующих постов сдвинутся!",
         parse_mode="Markdown",
-        reply_markup=get_confirm_delete_keyboard(pos)
-    )
+        reply_markup=get_confirm_delete_keyboard(pos))
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("confirm_delete_"))
 async def admin_delete_confirm(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌", show_alert=True)
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("❌", show_alert=True)
     pos = int(callback.data.split("_")[2])
     
     if await delete_content_by_position(pos):
@@ -546,17 +566,15 @@ async def admin_delete_confirm(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# ==================== АДМИН: НАСТРОИТЬ ВРЕМЯ ====================
+# ==================== АДМИН: ВРЕМЯ ====================
 
 @dp.message(F.text == "⏰ Настроить время")
 async def admin_schedule_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     h, m = await get_schedule()
     await message.answer(
-        f"⏰ Текущее время рассылки: {h:02d}:{m:02d}\n\n"
-        f"Введите новый час (0-23):",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]])
-    )
+        f"⏰ Текущее время: {h:02d}:{m:02d}\n\nВведите новый час (0-23):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
     await state.set_state(AdminStates.waiting_for_schedule_hour)
 
 
@@ -568,7 +586,10 @@ async def admin_schedule_cancel(message: types.Message | types.CallbackQuery, st
     if isinstance(message, types.CallbackQuery): await message.answer()
     await state.clear()
     target = message.message if isinstance(message, types.CallbackQuery) else message
-    await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard()) if isinstance(target, types.Message) else await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
+    if isinstance(target, types.Message):
+        await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard())
+    else:
+        await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
 
 @dp.message(AdminStates.waiting_for_schedule_hour)
@@ -576,10 +597,10 @@ async def admin_schedule_hour_save(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     if not message.text.isdigit() or not (0 <= int(message.text) < 24):
         return await message.answer("❌ Введите корректный час (0-23):")
-    
     await state.update_data(schedule_hour=int(message.text))
     await state.set_state(AdminStates.waiting_for_schedule_minute)
-    await message.answer("Введите минуты (0-59):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
+    await message.answer("Введите минуты (0-59):",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
 
 
 @dp.message(AdminStates.waiting_for_schedule_minute)
@@ -597,7 +618,7 @@ async def admin_schedule_minute_save(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Время изменено на {hour:02d}:{minute:02d}", reply_markup=get_admin_keyboard())
 
 
-# ==================== АДМИН: ОТЛАДКА ====================
+# ==================== ОТЛАДКА ====================
 
 @dp.message(Command("debug"))
 async def cmd_debug(message: types.Message):
@@ -623,11 +644,10 @@ async def cmd_debug(message: types.Message):
         (f"• След. запуск: {jobs[0].next_run_time.astimezone(ZoneInfo(SCHEDULE_TIMEZONE)).strftime('%H:%M %d.%m.%Y')}\n" if jobs else "") +
         f"• ADMIN_IDS: {ADMIN_IDS}\n"
         f"• Создатель бота: {BOT_TOKEN.split(':')[0] if BOT_TOKEN else 'N/A'}",
-        reply_markup=get_main_keyboard(is_active) if not is_admin(message.from_user.id) else get_admin_keyboard()
-    )
+        reply_markup=get_main_keyboard(is_active) if not is_admin(message.from_user.id) else get_admin_keyboard())
 
 
-# ==================== РАССЫЛКА И ПЛАНИРОВЩИК ====================
+# ==================== РАССЫЛКА ====================
 
 async def send_media_message(user_id: int, content: dict, test_mode: bool = False):
     text = content.get("text")
@@ -635,12 +655,18 @@ async def send_media_message(user_id: int, content: dict, test_mode: bool = Fals
     file_id = content.get("file_id")
     prefix = "🧪 **ТЕСТ**:\n\n" if test_mode else ""
     try:
-        if media_type == "photo" and file_id: await bot.send_photo(user_id, photo=file_id, caption=prefix + (text or ""))
-        elif media_type == "video" and file_id: await bot.send_video(user_id, video=file_id, caption=prefix + (text or ""))
-        elif media_type == "document" and file_id: await bot.send_document(user_id, document=file_id, caption=prefix + (text or ""))
-        elif media_type == "audio" and file_id: await bot.send_audio(user_id, audio=file_id, caption=prefix + (text or ""))
-        elif media_type == "voice" and file_id: await bot.send_voice(user_id, voice=file_id, caption=prefix + (text or ""))
-        else: await bot.send_message(user_id, prefix + (text or ""), parse_mode="Markdown" if test_mode else None)
+        if media_type == "photo" and file_id:
+            await bot.send_photo(user_id, photo=file_id, caption=prefix + (text or ""))
+        elif media_type == "video" and file_id:
+            await bot.send_video(user_id, video=file_id, caption=prefix + (text or ""))
+        elif media_type == "document" and file_id:
+            await bot.send_document(user_id, document=file_id, caption=prefix + (text or ""))
+        elif media_type == "audio" and file_id:
+            await bot.send_audio(user_id, audio=file_id, caption=prefix + (text or ""))
+        elif media_type == "voice" and file_id:
+            await bot.send_voice(user_id, voice=file_id, caption=prefix + (text or ""))
+        else:
+            await bot.send_message(user_id, prefix + (text or ""), parse_mode="Markdown" if test_mode else None)
     except Exception as e:
         logging.error(f"❌ Ошибка отправки {media_type} для {user_id}: {e}")
         if text: await bot.send_message(user_id, prefix + text)
@@ -680,8 +706,7 @@ async def setup_scheduler():
     scheduler.add_job(
         send_scheduled_content,
         CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(SCHEDULE_TIMEZONE), jitter=30),
-        id="drip_job", replace_existing=True, misfire_grace_time=3600
-    )
+        id="drip_job", replace_existing=True, misfire_grace_time=3600)
     logging.info(f"⏰ Планировщик: ежедневно в {hour:02d}:{minute:02d} {SCHEDULE_TIMEZONE}")
 
 
