@@ -12,6 +12,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 load_dotenv()
 
@@ -38,6 +39,16 @@ logging.basicConfig(
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
+
+# 🔘 Постоянная клавиатура для всех пользователей
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="▶️ Начать"), KeyboardButton(text="⏹️ Закончить")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+    input_field_placeholder="Выберите действие"
+)
 
 
 async def init_db():
@@ -203,24 +214,65 @@ async def update_schedule(hour: int, minute: int):
         await db.commit()
 
 
+# 🔘 Обработчик кнопки "▶️ Начать"
+@dp.message(F.text == "▶️ Начать")
+async def btn_start(message: types.Message):
+    await add_user(message.from_user.id, message.from_user.username)
+    count = await get_content_count()
+    h, m = await get_schedule()
+    await message.answer(
+        f"✅ Вы подписаны!\n"
+        f"Вас ждёт {count} сообщений.\n"
+        f"Рассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
+        reply_markup=MAIN_KEYBOARD
+    )
+
+
+# 🔘 Обработчик кнопки "⏹️ Закончить"
+@dp.message(F.text == "⏹️ Закончить")
+async def btn_stop(message: types.Message):
+    await deactivate_user(message.from_user.id)
+    await message.answer(
+        "🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.",
+        reply_markup=MAIN_KEYBOARD
+    )
+
+
+# ✅ /start тоже работает (для совместимости)
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     count = await get_content_count()
     h, m = await get_schedule()
-    # ✅ ИЗМЕНЕНО: "ежедневно" вместо "Пн/Ср/Пт"
     await message.answer(
         f"✅ Вы подписаны!\n"
         f"Вас ждёт {count} сообщений.\n"
-        f"Рассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).\n"
-        f"Чтобы остановить: /stop"
+        f"Рассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
+        reply_markup=MAIN_KEYBOARD
     )
 
 
+# ✅ /stop тоже работает (для совместимости)
 @dp.message(F.text == "/stop")
 async def cmd_stop(message: types.Message):
     await deactivate_user(message.from_user.id)
-    await message.answer("🔕 Рассылка остановлена. Для возврата: /start")
+    await message.answer(
+        "🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.",
+        reply_markup=MAIN_KEYBOARD
+    )
+
+
+# 🔘 Любое текстовое сообщение — показываем клавиатуру (чтобы она "прилипла")
+@dp.message(F.text)
+async def any_text_with_keyboard(message: types.Message):
+    # Не отвечаем на команды админа, чтобы не спамить
+    if message.text.startswith('/') and is_admin(message.from_user.id):
+        return
+    # Если пользователь уже нажал кнопку — обработано выше
+    if message.text in ["▶️ Начать", "⏹️ Закончить"]:
+        return
+    # Просто показываем клавиатуру в ответ на любое сообщение
+    await message.answer("👆 Используйте кнопки ниже:", reply_markup=MAIN_KEYBOARD)
 
 
 @dp.message(Command("add_user"))
@@ -246,7 +298,6 @@ async def cmd_add_post(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     
-    # ✅ ИСПРАВЛЕНИЕ: текст может быть в caption (для медиа) или text (для обычных сообщений)
     raw_text = message.caption if message.caption else message.text
     
     text = None
@@ -468,7 +519,6 @@ async def cmd_debug(message: types.Message):
     
     weekday_map = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
     
-    # ✅ ИЗМЕНЕНО: "ежедневно" вместо "Пн/Ср/Пт"
     await message.answer(
         f"🔍 ОТЛАДКА:\n"
         f"• Сейчас: {now.strftime('%H:%M %d.%m.%Y')} ({weekday_map[now.weekday()]})\n"
@@ -482,7 +532,6 @@ async def cmd_debug(message: types.Message):
     )
 
 
-# ✅ ИЗМЕНЕНО: убрана проверка дня недели — рассылка каждый день
 async def send_scheduled_content():
     logging.info("🔔 [JOB START] Запуск рассылки")
     
@@ -517,7 +566,6 @@ async def send_scheduled_content():
     logging.info(f"✅ [JOB END] Отправлено: {sent_count}")
 
 
-# ✅ ИЗМЕНЕНО: CronTrigger без day_of_week = каждый день
 async def setup_scheduler():
     hour, minute = await get_schedule()
     scheduler.remove_all_jobs()
@@ -525,7 +573,6 @@ async def setup_scheduler():
     scheduler.add_job(
         send_scheduled_content,
         CronTrigger(
-            # ✅ Убран day_of_week — задача выполняется КАЖДЫЙ день
             hour=hour,
             minute=minute,
             timezone=ZoneInfo(SCHEDULE_TIMEZONE),
