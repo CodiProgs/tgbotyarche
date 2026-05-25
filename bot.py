@@ -43,6 +43,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler()
 
+# ✅ ДНИ РАССЫЛКИ: 1=Вт, 3=Чт, 4=Пт, 6=Вс (нумерация: 0=Пн, 1=Вт, ..., 6=Вс)
+SEND_DAYS = "1,3,4,6"
+SEND_DAYS_TEXT = "Вт, Чт, Пт, Вс"
+
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -71,11 +75,10 @@ def get_post_list_keyboard(posts: list, mode: str = "edit") -> InlineKeyboardMar
     keyboard = []
     for pos, text, media_type, _ in posts[:10]:
         emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
-        preview = (text or "[без текста]")[:25] + "..."
-        # Две кнопки в ряд: выбор поста и предпросмотр
+        preview = (text or "[без текста]")[:20] + "..."
         keyboard.append([
             InlineKeyboardButton(text=f"{emoji} #{pos}", callback_data=f"{mode}_{pos}"),
-            InlineKeyboardButton(text="👁️", callback_data=f"preview_{pos}")
+            InlineKeyboardButton(text="Просмотр", callback_data=f"preview_{pos}")
         ])
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -250,15 +253,17 @@ async def btn_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     count = await get_content_count()
     h, m = await get_schedule()
+    # ✅ ИЗМЕНЕНО: указаны конкретные дни
     await message.answer(
-        f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\nРассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
+        f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\n"
+        f"Рассылка: {SEND_DAYS_TEXT} в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
         reply_markup=get_main_keyboard(is_active=True))
 
 
 @dp.message(F.text == "⏹️ Закончить")
 async def btn_stop(message: types.Message):
     await deactivate_user(message.from_user.id)
-    await message.answer("🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.",
+    await message.answer(f"🔕 Рассылка остановлена. Нажмите «▶️ Начать», чтобы вернуться.",
                         reply_markup=get_main_keyboard(is_active=False))
 
 
@@ -270,8 +275,10 @@ async def cmd_start(message: types.Message):
         await add_user(message.from_user.id, message.from_user.username)
         count = await get_content_count()
         h, m = await get_schedule()
+        # ✅ ИЗМЕНЕНО: указаны конкретные дни
         await message.answer(
-            f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\nРассылка: ежедневно в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
+            f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\n"
+            f"Рассылка: {SEND_DAYS_TEXT} в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
             reply_markup=get_main_keyboard(is_active=True))
 
 
@@ -346,9 +353,8 @@ async def admin_preview_post(callback: types.CallbackQuery):
     if not content:
         return await callback.answer("❌ Пост не найден", show_alert=True)
     
-    # Отправляем пост БЕЗ префикса "ТЕСТ" — точно как для пользователя
     await send_media_message(callback.from_user.id, content, test_mode=False)
-    await callback.answer(f"👁️ Пост #{pos} отправлен вам в чат")
+    await callback.answer(f"✅ Пост #{pos} отправлен вам в чат для просмотра")
 
 
 # ==================== АДМИН: ДОБАВИТЬ ПОСТ ====================
@@ -630,13 +636,13 @@ async def cmd_debug(message: types.Message):
         async with db.execute("SELECT step FROM users WHERE user_id = ?", (message.from_user.id,)) as cursor:
             result = await cursor.fetchone()
             my_step = result[0] if result else None
-    weekday_map = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]
+    weekday_map = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     is_active = await get_user_status(message.from_user.id)
     
     await message.answer(
         f"🔍 ОТЛАДКА:\n"
         f"• Сейчас: {now.strftime('%H:%M %d.%m.%Y')} ({weekday_map[now.weekday()]})\n"
-        f"• Рассылка: ежедневно в {h:02d}:{m:02d} {SCHEDULE_TIMEZONE}\n"
+        f"• Рассылка: {SEND_DAYS_TEXT} в {h:02d}:{m:02d} {SCHEDULE_TIMEZONE}\n"
         f"• Ваш статус: {'✅ Подписан' if is_active else '❌ Не подписан'}\n"
         f"• Ваш шаг: {my_step}\n"
         f"• Постов в БД: {await get_content_count()}\n"
@@ -700,14 +706,21 @@ async def send_scheduled_content():
     logging.info(f"✅ [JOB END] Отправлено: {sent_count}")
 
 
+# ✅ ИЗМЕНЕНО: добавлен day_of_week для конкретных дней
 async def setup_scheduler():
     hour, minute = await get_schedule()
     scheduler.remove_all_jobs()
     scheduler.add_job(
         send_scheduled_content,
-        CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(SCHEDULE_TIMEZONE), jitter=30),
+        CronTrigger(
+            day_of_week=SEND_DAYS,  # ✅ 1=Вт, 3=Чт, 4=Пт, 6=Вс
+            hour=hour,
+            minute=minute,
+            timezone=ZoneInfo(SCHEDULE_TIMEZONE),
+            jitter=30
+        ),
         id="drip_job", replace_existing=True, misfire_grace_time=3600)
-    logging.info(f"⏰ Планировщик: ежедневно в {hour:02d}:{minute:02d} {SCHEDULE_TIMEZONE}")
+    logging.info(f"⏰ Планировщик: {SEND_DAYS_TEXT} в {hour:02d}:{minute:02d} {SCHEDULE_TIMEZONE}")
 
 
 # ==================== ЗАПУСК ====================
