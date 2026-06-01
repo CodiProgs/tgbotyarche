@@ -70,6 +70,13 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def get_admin_inline_back() -> InlineKeyboardMarkup:
+    """Инлайн-кнопка 'Назад' для использования в edit_text"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 В меню", callback_data="admin_back")]
+    ])
+
+
 def get_post_list_keyboard(posts: list, mode: str = "edit") -> InlineKeyboardMarkup:
     keyboard = []
     for pos, text, media_type, _ in posts[:10]:
@@ -194,22 +201,14 @@ async def get_all_content():
             return await cursor.fetchall()
 
 
-# ✅ ИСПРАВЛЕНО: безопасное удаление со сдвигом позиций
 async def delete_content_by_position(pos: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
-        # Сначала сдвигаем позиции ВСЕХ постов, которые идут после удаляемого
-        # Используем временное отрицательное значение, чтобы избежать конфликта UNIQUE
         await db.execute("UPDATE content SET position = -position WHERE position > ?", (pos,))
         await db.commit()
-        
-        # Теперь удаляем целевой пост
         cursor = await db.execute("DELETE FROM content WHERE position = ?", (pos,))
         await db.commit()
-        
-        # Возвращаем сдвинутые позиции в положительный диапазон
         await db.execute("UPDATE content SET position = -position WHERE position < 0")
         await db.commit()
-        
         return cursor.rowcount > 0
 
 
@@ -338,11 +337,9 @@ async def admin_back_callback(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
     await state.clear()
-    try:
-        await callback.message.edit_text("🔙 Возврат в меню", reply_markup=get_admin_keyboard())
-    except:
-        await callback.message.answer("🔙 Возврат в меню", reply_markup=get_admin_keyboard())
+    # ✅ ИСПРАВЛЕНО: используем answer() вместо edit_text() для ReplyKeyboardMarkup
     await callback.answer()
+    await callback.message.answer("🔙 Возврат в меню", reply_markup=get_admin_keyboard())
 
 
 # ==================== 👁️ ПРЕДПРОСМОТР ПОСТА ====================
@@ -416,7 +413,6 @@ async def admin_edit_start(message: types.Message):
                         reply_markup=get_post_list_keyboard(posts, mode="edit"))
 
 
-# ✅ ИСПРАВЛЕНО: используем regexp для надёжной фильтрации
 @dp.callback_query(F.data.regexp(r"^edit_\d+$"))
 async def admin_edit_select(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -459,7 +455,7 @@ async def admin_edit_text_cancel(message: types.Message | types.CallbackQuery, s
     await state.clear()
     target = message.message if isinstance(message, types.CallbackQuery) else message
     if isinstance(target, types.Message):
-        await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard())
+        await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
     else:
         await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
@@ -495,7 +491,7 @@ async def admin_edit_media_cancel(message: types.Message | types.CallbackQuery, 
     await state.clear()
     target = message.message if isinstance(message, types.CallbackQuery) else message
     if isinstance(target, types.Message):
-        await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard())
+        await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
     else:
         await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
@@ -535,7 +531,6 @@ async def admin_delete_start(message: types.Message):
                         reply_markup=get_post_list_keyboard(posts, mode="delete"))
 
 
-# ✅ ИСПРАВЛЕНО: используем regexp для надёжной фильтрации
 @dp.callback_query(F.data.regexp(r"^delete_\d+$"))
 async def admin_delete_select(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -565,10 +560,12 @@ async def admin_delete_confirm(callback: types.CallbackQuery):
     pos = int(callback.data.split("_")[2])
     
     if await delete_content_by_position(pos):
-        await callback.message.edit_text(f"✅ Пост #{pos} удалён!", reply_markup=get_admin_keyboard())
+        # ✅ ИСПРАВЛЕНО: используем answer() вместо edit_text() для ReplyKeyboardMarkup
+        await callback.answer()
+        await callback.message.answer(f"✅ Пост #{pos} удалён!", reply_markup=get_admin_keyboard())
     else:
-        await callback.message.edit_text(f"❌ Пост #{pos} не найден", reply_markup=get_admin_keyboard())
-    await callback.answer()
+        await callback.answer()
+        await callback.message.answer(f"❌ Пост #{pos} не найден", reply_markup=get_admin_keyboard())
 
 
 # ==================== АДМИН: ВРЕМЯ ====================
@@ -592,7 +589,7 @@ async def admin_schedule_cancel(message: types.Message | types.CallbackQuery, st
     await state.clear()
     target = message.message if isinstance(message, types.CallbackQuery) else message
     if isinstance(target, types.Message):
-        await target.edit_text("❌ Отменено", reply_markup=get_admin_keyboard())
+        await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
     else:
         await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
