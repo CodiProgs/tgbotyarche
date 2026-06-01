@@ -43,7 +43,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler()
 
-# ✅ ДНИ РАССЫЛКИ: 1=Вт, 3=Чт, 4=Пт, 6=Вс (нумерация: 0=Пн, 1=Вт, ..., 6=Вс)
+# ✅ ДНИ РАССЫЛКИ: 1=Вт, 3=Чт, 4=Пт, 6=Вс
 SEND_DAYS = "1,3,4,6"
 SEND_DAYS_TEXT = "Вт, Чт, Пт, Вс"
 
@@ -71,7 +71,6 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_post_list_keyboard(posts: list, mode: str = "edit") -> InlineKeyboardMarkup:
-    """Кнопки выбора поста + предпросмотр"""
     keyboard = []
     for pos, text, media_type, _ in posts[:10]:
         emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
@@ -195,12 +194,22 @@ async def get_all_content():
             return await cursor.fetchall()
 
 
+# ✅ ИСПРАВЛЕНО: безопасное удаление со сдвигом позиций
 async def delete_content_by_position(pos: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
+        # Сначала сдвигаем позиции ВСЕХ постов, которые идут после удаляемого
+        # Используем временное отрицательное значение, чтобы избежать конфликта UNIQUE
+        await db.execute("UPDATE content SET position = -position WHERE position > ?", (pos,))
+        await db.commit()
+        
+        # Теперь удаляем целевой пост
         cursor = await db.execute("DELETE FROM content WHERE position = ?", (pos,))
         await db.commit()
-        await db.execute("UPDATE content SET position = position - 1 WHERE position > ?", (pos,))
+        
+        # Возвращаем сдвинутые позиции в положительный диапазон
+        await db.execute("UPDATE content SET position = -position WHERE position < 0")
         await db.commit()
+        
         return cursor.rowcount > 0
 
 
@@ -253,7 +262,6 @@ async def btn_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     count = await get_content_count()
     h, m = await get_schedule()
-    # ✅ ИЗМЕНЕНО: указаны конкретные дни
     await message.answer(
         f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\n"
         f"Рассылка: {SEND_DAYS_TEXT} в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
@@ -275,7 +283,6 @@ async def cmd_start(message: types.Message):
         await add_user(message.from_user.id, message.from_user.username)
         count = await get_content_count()
         h, m = await get_schedule()
-        # ✅ ИЗМЕНЕНО: указаны конкретные дни
         await message.answer(
             f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\n"
             f"Рассылка: {SEND_DAYS_TEXT} в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
@@ -328,10 +335,8 @@ async def admin_stats(message: types.Message):
 
 @dp.callback_query(F.data == "admin_back")
 async def admin_back_callback(callback: types.CallbackQuery, state: FSMContext):
-    """✅ Универсальный обработчик кнопки 'Назад' для админа"""
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
-    
     await state.clear()
     try:
         await callback.message.edit_text("🔙 Возврат в меню", reply_markup=get_admin_keyboard())
@@ -342,17 +347,14 @@ async def admin_back_callback(callback: types.CallbackQuery, state: FSMContext):
 
 # ==================== 👁️ ПРЕДПРОСМОТР ПОСТА ====================
 
-@dp.callback_query(F.data.startswith("preview_"))
+@dp.callback_query(F.data.regexp(r"^preview_\d+$"))
 async def admin_preview_post(callback: types.CallbackQuery):
-    """✅ Показывает пост так, как его увидит обычный пользователь"""
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌", show_alert=True)
-    
     pos = int(callback.data.split("_")[1])
     content = await get_content_by_position(pos)
     if not content:
         return await callback.answer("❌ Пост не найден", show_alert=True)
-    
     await send_media_message(callback.from_user.id, content, test_mode=False)
     await callback.answer(f"✅ Пост #{pos} отправлен вам в чат для просмотра")
 
@@ -384,7 +386,6 @@ async def admin_add_post_cancel(message: types.Message | types.CallbackQuery, st
 @dp.message(AdminStates.waiting_for_post_text)
 async def admin_add_post_save(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
-    
     raw_text = message.caption if message.caption else message.text
     text = raw_text.strip() if raw_text and not raw_text.strip().startswith("🔙") else None
     
@@ -396,7 +397,6 @@ async def admin_add_post_save(message: types.Message, state: FSMContext):
     elif message.voice: media_type, file_id = "voice", message.voice.file_id
     
     if not text and media_type != "text": text = None
-    
     pos = await add_content(text=text, media_type=media_type, file_id=file_id)
     await state.clear()
     
@@ -416,12 +416,11 @@ async def admin_edit_start(message: types.Message):
                         reply_markup=get_post_list_keyboard(posts, mode="edit"))
 
 
-@dp.callback_query(F.data.startswith("edit_") and not F.data.startswith("edit_text") and not F.data.startswith("edit_media"))
+# ✅ ИСПРАВЛЕНО: используем regexp для надёжной фильтрации
+@dp.callback_query(F.data.regexp(r"^edit_\d+$"))
 async def admin_edit_select(callback: types.CallbackQuery):
-    """Выбор поста для редактирования"""
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
-    
     pos = int(callback.data.split("_")[1])
     content = await get_content_by_position(pos)
     if not content:
@@ -440,7 +439,7 @@ async def admin_edit_select(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("edit_text_"))
+@dp.callback_query(F.data.regexp(r"^edit_text_\d+$"))
 async def admin_edit_text_start(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌", show_alert=True)
@@ -471,13 +470,12 @@ async def admin_edit_text_save(message: types.Message, state: FSMContext):
     data = await state.get_data()
     pos = data.get("edit_pos")
     if not pos: return await message.answer("❌ Ошибка")
-    
     await edit_content_by_position(pos, text=message.text)
     await state.clear()
     await message.answer(f"✅ Текст поста #{pos} обновлён!", reply_markup=get_admin_keyboard())
 
 
-@dp.callback_query(F.data.startswith("edit_media_"))
+@dp.callback_query(F.data.regexp(r"^edit_media_\d+$"))
 async def admin_edit_media_start(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌", show_alert=True)
@@ -537,7 +535,8 @@ async def admin_delete_start(message: types.Message):
                         reply_markup=get_post_list_keyboard(posts, mode="delete"))
 
 
-@dp.callback_query(F.data.startswith("delete_"))
+# ✅ ИСПРАВЛЕНО: используем regexp для надёжной фильтрации
+@dp.callback_query(F.data.regexp(r"^delete_\d+$"))
 async def admin_delete_select(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
@@ -559,7 +558,7 @@ async def admin_delete_select(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("confirm_delete_"))
+@dp.callback_query(F.data.regexp(r"^confirm_delete_\d+$"))
 async def admin_delete_confirm(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌", show_alert=True)
@@ -706,14 +705,13 @@ async def send_scheduled_content():
     logging.info(f"✅ [JOB END] Отправлено: {sent_count}")
 
 
-# ✅ ИЗМЕНЕНО: добавлен day_of_week для конкретных дней
 async def setup_scheduler():
     hour, minute = await get_schedule()
     scheduler.remove_all_jobs()
     scheduler.add_job(
         send_scheduled_content,
         CronTrigger(
-            day_of_week=SEND_DAYS,  # ✅ 1=Вт, 3=Чт, 4=Пт, 6=Вс
+            day_of_week=SEND_DAYS,
             hour=hour,
             minute=minute,
             timezone=ZoneInfo(SCHEDULE_TIMEZONE),
