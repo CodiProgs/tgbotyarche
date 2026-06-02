@@ -178,12 +178,14 @@ async def deactivate_user(user_id: int):
 
 async def add_content(text: str = None, media_type: str = "text", file_id: str = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COALESCE(MAX(position), 0) FROM content") as cursor:
-            next_pos = (await cursor.fetchone())[0] or 0
-        await db.execute("INSERT INTO content (text, media_type, file_id, position) VALUES (?, ?, ?, ?)",
-                        (text, media_type, file_id, next_pos + 1))
+        await db.execute(
+            "INSERT INTO content (text, media_type, file_id, position) "
+            "VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM content))",
+            (text, media_type, file_id),
+        )
         await db.commit()
-        return next_pos + 1
+        async with db.execute("SELECT MAX(position) FROM content") as cursor:
+            return (await cursor.fetchone())[0]
 
 
 async def get_content_by_position(pos: int):
