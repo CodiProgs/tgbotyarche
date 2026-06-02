@@ -44,9 +44,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler()
 
-# Храним недавно обработанные альбомы, чтобы не создавать несколько постов из одного media_group.
-PROCESSED_MEDIA_GROUPS: dict[str, datetime] = {}
-MEDIA_GROUP_TTL_SECONDS = 300
+# Буфер альбомов: собираем все сообщения media_group и создаем один пост.
+ALBUM_BUFFER_SECONDS = 1.0
+ALBUM_BUFFER: dict[str, list[types.Message]] = {}
+ALBUM_TASKS: dict[str, asyncio.Task] = {}
 
 # ✅ ДНИ РАССЫЛКИ: 1=Вт, 3=Чт, 4=Пт, 6=Вс
 SEND_DAYS = "1,3,4,6"
@@ -179,15 +180,61 @@ def is_admin(user_id: int) -> bool:
         return user_id in ADMIN_IDS
 
 
-def purge_old_media_groups() -> None:
-    now = datetime.now()
-    expired = [
-        group_id
-        for group_id, created_at in PROCESSED_MEDIA_GROUPS.items()
-        if (now - created_at).total_seconds() > MEDIA_GROUP_TTL_SECONDS
-    ]
-    for group_id in expired:
-        PROCESSED_MEDIA_GROUPS.pop(group_id, None)
+def get_message_media(message: types.Message) -> tuple[str, str | None]:
+    media_type, file_id = "text", None
+    if message.photo:
+        media_type, file_id = "photo", message.photo[-1].file_id
+    elif message.video:
+        media_type, file_id = "video", message.video.file_id
+    elif message.document:
+        media_type, file_id = "document", message.document.file_id
+    elif message.audio:
+        media_type, file_id = "audio", message.audio.file_id
+    elif message.voice:
+        media_type, file_id = "voice", message.voice.file_id
+    return media_type, file_id
+
+
+def normalize_post_text(raw_text: str | None) -> str | None:
+    if not raw_text:
+        return None
+    stripped = raw_text.strip()
+    if not stripped or stripped.startswith("🔙"):
+        return None
+    return stripped
+
+
+async def finalize_album_post(album_key: str, chat_id: int, state: FSMContext):
+    await asyncio.sleep(ALBUM_BUFFER_SECONDS)
+    messages = ALBUM_BUFFER.pop(album_key, [])
+    ALBUM_TASKS.pop(album_key, None)
+    if not messages:
+        return
+
+    messages.sort(key=lambda msg: msg.message_id)
+    selected = None
+    selected_text = None
+
+    for msg in messages:
+        text_candidate = normalize_post_text(msg.caption if msg.caption else msg.text)
+        if text_candidate:
+            selected = msg
+            selected_text = text_candidate
+            break
+
+    if selected is None:
+        selected = messages[0]
+        selected_text = normalize_post_text(selected.caption if selected.caption else selected.text)
+
+    media_type, file_id = get_message_media(selected)
+    if media_type != "text" and file_id:
+        file_id = await save_telegram_media(file_id, media_type)
+
+    pos = await add_content(text=selected_text, media_type=media_type, file_id=file_id)
+    await state.clear()
+
+    emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
+    await bot.send_message(chat_id, f"{emoji} ✅ Пост #{pos} добавлен!", reply_markup=get_admin_keyboard())
 
 
 async def add_user(user_id: int, username: str = None):
@@ -429,25 +476,31 @@ async def admin_add_post_cancel(message: types.Message | types.CallbackQuery, st
     await target.answer("❌ Отменено", reply_markup=get_admin_keyboard())
 
 
+@dp.message(AdminStates.waiting_for_post_text, F.media_group_id)
+async def admin_add_post_save_album(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    album_key = f"{message.chat.id}:{message.media_group_id}"
+    ALBUM_BUFFER.setdefault(album_key, []).append(message)
+
+    task = ALBUM_TASKS.get(album_key)
+    if task is None or task.done():
+        ALBUM_TASKS[album_key] = asyncio.create_task(
+            finalize_album_post(album_key, message.chat.id, state)
+        )
+
+
 @dp.message(AdminStates.waiting_for_post_text)
 async def admin_add_post_save(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
 
     if message.media_group_id:
-        purge_old_media_groups()
-        if message.media_group_id in PROCESSED_MEDIA_GROUPS:
-            return
-        PROCESSED_MEDIA_GROUPS[message.media_group_id] = datetime.now()
+        return
 
-    raw_text = message.caption if message.caption else message.text
-    text = raw_text.strip() if raw_text and not raw_text.strip().startswith("🔙") else None
-    
-    media_type, file_id = "text", None
-    if message.photo: media_type, file_id = "photo", message.photo[-1].file_id
-    elif message.video: media_type, file_id = "video", message.video.file_id
-    elif message.document: media_type, file_id = "document", message.document.file_id
-    elif message.audio: media_type, file_id = "audio", message.audio.file_id
-    elif message.voice: media_type, file_id = "voice", message.voice.file_id
+    text = normalize_post_text(message.caption if message.caption else message.text)
+
+    media_type, file_id = get_message_media(message)
     
     if not text and media_type != "text": text = None
     if media_type != "text" and file_id:
