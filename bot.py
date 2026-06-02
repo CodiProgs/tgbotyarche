@@ -48,7 +48,7 @@ SEND_DAYS = "1,3,4,6"
 SEND_DAYS_TEXT = "Вт, Чт, Пт, Вс"
 
 
-# ==================== КЛАВИАТУРЫ ====================
+# ==================== КЛАВИАТУРЫ ===================
 
 def get_main_keyboard(is_active: bool) -> ReplyKeyboardMarkup:
     keyboard = [[KeyboardButton(text="⏹️ Закончить")]] if is_active else [[KeyboardButton(text="▶️ Начать")]]
