@@ -44,6 +44,10 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler()
 
+# Храним недавно обработанные альбомы, чтобы не создавать несколько постов из одного media_group.
+PROCESSED_MEDIA_GROUPS: dict[str, datetime] = {}
+MEDIA_GROUP_TTL_SECONDS = 300
+
 # ✅ ДНИ РАССЫЛКИ: 1=Вт, 3=Чт, 4=Пт, 6=Вс
 SEND_DAYS = "1,3,4,6"
 SEND_DAYS_TEXT = "Вт, Чт, Пт, Вс"
@@ -173,6 +177,17 @@ def is_admin(user_id: int) -> bool:
         return user_id in ADMIN_IDS or user_id == int(BOT_TOKEN.split(":")[0])
     except:
         return user_id in ADMIN_IDS
+
+
+def purge_old_media_groups() -> None:
+    now = datetime.now()
+    expired = [
+        group_id
+        for group_id, created_at in PROCESSED_MEDIA_GROUPS.items()
+        if (now - created_at).total_seconds() > MEDIA_GROUP_TTL_SECONDS
+    ]
+    for group_id in expired:
+        PROCESSED_MEDIA_GROUPS.pop(group_id, None)
 
 
 async def add_user(user_id: int, username: str = None):
@@ -417,6 +432,13 @@ async def admin_add_post_cancel(message: types.Message | types.CallbackQuery, st
 @dp.message(AdminStates.waiting_for_post_text)
 async def admin_add_post_save(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
+
+    if message.media_group_id:
+        purge_old_media_groups()
+        if message.media_group_id in PROCESSED_MEDIA_GROUPS:
+            return
+        PROCESSED_MEDIA_GROUPS[message.media_group_id] = datetime.now()
+
     raw_text = message.caption if message.caption else message.text
     text = raw_text.strip() if raw_text and not raw_text.strip().startswith("🔙") else None
     
