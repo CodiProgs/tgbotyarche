@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -14,6 +15,7 @@ from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import InputMediaPhoto, InputMediaVideo
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -86,7 +88,7 @@ def get_admin_inline_back() -> InlineKeyboardMarkup:
 def get_post_list_keyboard(posts: list, mode: str = "edit") -> InlineKeyboardMarkup:
     keyboard = []
     for pos, text, media_type, _ in posts[:10]:
-        emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
+        emoji = {"album": "🖼️", "photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
         preview = (text or "[без текста]")[:20] + "..."
         keyboard.append([
             InlineKeyboardButton(text=f"{emoji} #{pos}", callback_data=f"{mode}_{pos}"),
@@ -204,6 +206,30 @@ def normalize_post_text(raw_text: str | None) -> str | None:
     return stripped
 
 
+def serialize_album_items(items: list[dict]) -> str:
+    return json.dumps(items, ensure_ascii=False)
+
+
+def deserialize_album_items(raw: str | None) -> list[dict]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    normalized = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        item_file_id = item.get("file_id")
+        if item_type in {"photo", "video"} and isinstance(item_file_id, str) and item_file_id:
+            normalized.append({"type": item_type, "file_id": item_file_id})
+    return normalized
+
+
 async def finalize_album_post(album_key: str, chat_id: int, state: FSMContext):
     await asyncio.sleep(ALBUM_BUFFER_SECONDS)
     messages = ALBUM_BUFFER.pop(album_key, [])
@@ -212,28 +238,33 @@ async def finalize_album_post(album_key: str, chat_id: int, state: FSMContext):
         return
 
     messages.sort(key=lambda msg: msg.message_id)
-    selected = None
     selected_text = None
-
     for msg in messages:
         text_candidate = normalize_post_text(msg.caption if msg.caption else msg.text)
         if text_candidate:
-            selected = msg
             selected_text = text_candidate
             break
 
-    if selected is None:
-        selected = messages[0]
-        selected_text = normalize_post_text(selected.caption if selected.caption else selected.text)
+    album_items: list[dict] = []
+    for msg in messages:
+        media_type, file_id = get_message_media(msg)
+        if media_type not in {"photo", "video"} or not file_id:
+            continue
+        local_file = await save_telegram_media(file_id, media_type)
+        album_items.append({"type": media_type, "file_id": local_file})
 
-    media_type, file_id = get_message_media(selected)
-    if media_type != "text" and file_id:
-        file_id = await save_telegram_media(file_id, media_type)
+    if not album_items:
+        first = messages[0]
+        media_type, file_id = get_message_media(first)
+        if media_type != "text" and file_id:
+            file_id = await save_telegram_media(file_id, media_type)
+        pos = await add_content(text=selected_text, media_type=media_type, file_id=file_id)
+        emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
+    else:
+        pos = await add_content(text=selected_text, media_type="album", file_id=serialize_album_items(album_items))
+        emoji = "🖼️"
 
-    pos = await add_content(text=selected_text, media_type=media_type, file_id=file_id)
     await state.clear()
-
-    emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(media_type, "📝")
     await bot.send_message(chat_id, f"{emoji} ✅ Пост #{pos} добавлен!", reply_markup=get_admin_keyboard())
 
 
@@ -406,7 +437,7 @@ async def admin_list_posts(message: types.Message):
     if not posts:
         return await message.answer("📭 Постов пока нет", reply_markup=get_admin_keyboard())
     
-    media_emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}
+    media_emoji = {"album": "🖼️", "photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}
     result = "📋 Все посты:\n\n"
     for pos, text, media_type, _ in posts:
         emoji = media_emoji.get(media_type, "📝")
@@ -533,7 +564,7 @@ async def admin_edit_select(callback: types.CallbackQuery):
     if not content:
         return await callback.answer("❌ Пост не найден", show_alert=True)
     
-    emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(content["media_type"], "📝")
+    emoji = {"album": "🖼️", "photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(content["media_type"], "📝")
     preview = (content["text"] or "[без текста]")[:100]
     
     await callback.message.edit_text(
@@ -654,7 +685,7 @@ async def admin_delete_select(callback: types.CallbackQuery):
     if not content:
         return await callback.answer("❌ Пост не найден", show_alert=True)
     
-    emoji = {"photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(content["media_type"], "📝")
+    emoji = {"album": "🖼️", "photo": "📷", "video": "🎥", "document": "📄", "audio": "🎵", "voice": "🎤", "text": "📝"}.get(content["media_type"], "📝")
     preview = (content["text"] or "[без текста]")[:100]
     
     await callback.message.edit_text(
@@ -772,6 +803,28 @@ async def send_media_message(user_id: int, content: dict, test_mode: bool = Fals
     try:
         caption = prefix + (text or "")
         is_local_file = bool(file_id and os.path.exists(file_id))
+
+        if media_type == "album":
+            album_items = deserialize_album_items(file_id)
+            if not album_items:
+                await bot.send_message(user_id, prefix + (text or ""), parse_mode="Markdown" if test_mode else None)
+                return
+
+            media_group = []
+            for idx, item in enumerate(album_items[:10]):
+                item_type = item["type"]
+                item_file_id = item["file_id"]
+                media_input = FSInputFile(item_file_id) if os.path.exists(item_file_id) else item_file_id
+                item_caption = caption if idx == 0 else None
+
+                if item_type == "photo":
+                    media_group.append(InputMediaPhoto(media=media_input, caption=item_caption))
+                elif item_type == "video":
+                    media_group.append(InputMediaVideo(media=media_input, caption=item_caption))
+
+            if media_group:
+                await bot.send_media_group(user_id, media=media_group)
+            return
 
         if media_type == "photo" and file_id:
             media = FSInputFile(file_id) if is_local_file else file_id
