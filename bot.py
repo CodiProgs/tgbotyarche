@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-DB_PATH = "bot_data.db"
+DB_PATH = os.getenv("DB_PATH", "/app/data/bot_data.db")
 SCHEDULE_TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow").strip()
 DEFAULT_HOUR = int(os.getenv("SCHED_HOUR", 10))
 DEFAULT_MINUTE = int(os.getenv("SCHED_MIN", 0))
@@ -119,6 +119,7 @@ class AdminStates(StatesGroup):
 # ==================== БД ====================
 
 async def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, username TEXT, step INTEGER DEFAULT 1,
