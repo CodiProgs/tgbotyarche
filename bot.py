@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -12,7 +13,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -135,6 +136,34 @@ async def init_db():
         await db.execute("UPDATE users SET step = MAX(step, 1), active = 1")
         await db.commit()
     logging.info("✅ База данных инициализирована")
+
+
+def get_media_root() -> str:
+    db_dir = os.path.dirname(DB_PATH)
+    storage_root = db_dir if db_dir else "."
+    return os.path.join(storage_root, "media")
+
+
+async def save_telegram_media(file_id: str, media_type: str) -> str:
+    media_root = get_media_root()
+    media_dir = os.path.join(media_root, media_type)
+    os.makedirs(media_dir, exist_ok=True)
+
+    tg_file = await bot.get_file(file_id)
+    ext = os.path.splitext(tg_file.file_path or "")[1]
+    if not ext:
+        ext = {
+            "photo": ".jpg",
+            "video": ".mp4",
+            "document": ".bin",
+            "audio": ".mp3",
+            "voice": ".ogg",
+        }.get(media_type, ".bin")
+
+    file_name = f"{uuid.uuid4().hex}{ext}"
+    local_path = os.path.join(media_dir, file_name)
+    await bot.download_file(tg_file.file_path, destination=local_path)
+    return local_path
 
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -399,6 +428,8 @@ async def admin_add_post_save(message: types.Message, state: FSMContext):
     elif message.voice: media_type, file_id = "voice", message.voice.file_id
     
     if not text and media_type != "text": text = None
+    if media_type != "text" and file_id:
+        file_id = await save_telegram_media(file_id, media_type)
     pos = await add_content(text=text, media_type=media_type, file_id=file_id)
     await state.clear()
     
@@ -518,6 +549,8 @@ async def admin_edit_media_save(message: types.Message, state: FSMContext):
     if not media_type:
         return await message.answer("❌ Отправьте фото, видео или файл",
                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]))
+
+    file_id = await save_telegram_media(file_id, media_type)
     
     await edit_content_by_position(pos, media_type=media_type, file_id=file_id)
     await state.clear()
@@ -662,16 +695,24 @@ async def send_media_message(user_id: int, content: dict, test_mode: bool = Fals
     file_id = content.get("file_id")
     prefix = "🧪 **ТЕСТ**:\n\n" if test_mode else ""
     try:
+        caption = prefix + (text or "")
+        is_local_file = bool(file_id and os.path.exists(file_id))
+
         if media_type == "photo" and file_id:
-            await bot.send_photo(user_id, photo=file_id, caption=prefix + (text or ""))
+            media = FSInputFile(file_id) if is_local_file else file_id
+            await bot.send_photo(user_id, photo=media, caption=caption)
         elif media_type == "video" and file_id:
-            await bot.send_video(user_id, video=file_id, caption=prefix + (text or ""))
+            media = FSInputFile(file_id) if is_local_file else file_id
+            await bot.send_video(user_id, video=media, caption=caption)
         elif media_type == "document" and file_id:
-            await bot.send_document(user_id, document=file_id, caption=prefix + (text or ""))
+            media = FSInputFile(file_id) if is_local_file else file_id
+            await bot.send_document(user_id, document=media, caption=caption)
         elif media_type == "audio" and file_id:
-            await bot.send_audio(user_id, audio=file_id, caption=prefix + (text or ""))
+            media = FSInputFile(file_id) if is_local_file else file_id
+            await bot.send_audio(user_id, audio=media, caption=caption)
         elif media_type == "voice" and file_id:
-            await bot.send_voice(user_id, voice=file_id, caption=prefix + (text or ""))
+            media = FSInputFile(file_id) if is_local_file else file_id
+            await bot.send_voice(user_id, voice=media, caption=caption)
         else:
             await bot.send_message(user_id, prefix + (text or ""), parse_mode="Markdown" if test_mode else None)
     except Exception as e:
