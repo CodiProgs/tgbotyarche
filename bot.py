@@ -116,10 +116,12 @@ class AdminStates(StatesGroup):
     waiting_for_schedule_minute = State()
 
 
-# ==================== БД ====================
+# ==================== БД ===================
 
 async def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, username TEXT, step INTEGER DEFAULT 1,
