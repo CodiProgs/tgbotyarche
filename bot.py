@@ -25,7 +25,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DB_PATH", "/app/data/bot_data.db")
 SCHEDULE_TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow").strip()
-DEFAULT_HOUR = int(os.getenv("SCHED_HOUR", 10))
+DEFAULT_HOUR = int(os.getenv("SCHED_HOUR", 20))
 DEFAULT_MINUTE = int(os.getenv("SCHED_MIN", 0))
 
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
@@ -51,9 +51,8 @@ ALBUM_BUFFER_SECONDS = 1.0
 ALBUM_BUFFER: dict[str, list[types.Message]] = {}
 ALBUM_TASKS: dict[str, asyncio.Task] = {}
 
-# ✅ ДНИ РАССЫЛКИ: 1=Вт, 3=Чт, 4=Пт, 6=Вс
-SEND_DAYS = "1,3,4,6"
-SEND_DAYS_TEXT = "Вт, Чт, Пт, Вс"
+# ✅ ИЗМЕНЕНО: рассылка каждый день
+SEND_DAYS_TEXT = "ежедневно"
 
 
 # ==================== КЛАВИАТУРЫ ===================
@@ -388,6 +387,7 @@ async def btn_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     count = await get_content_count()
     h, m = await get_schedule()
+    # ✅ ИЗМЕНЕНО: "ежедневно" вместо конкретных дней
     await message.answer(
         f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\n"
         f"Рассылка: {SEND_DAYS_TEXT} в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
@@ -409,6 +409,7 @@ async def cmd_start(message: types.Message):
         await add_user(message.from_user.id, message.from_user.username)
         count = await get_content_count()
         h, m = await get_schedule()
+        # ✅ ИЗМЕНЕНО: "ежедневно" вместо конкретных дней
         await message.answer(
             f"✅ Вы подписаны!\nВас ждёт {count} сообщений.\n"
             f"Рассылка: {SEND_DAYS_TEXT} в {h:02d}:{m:02d} ({SCHEDULE_TIMEZONE}).",
@@ -464,7 +465,6 @@ async def admin_back_callback(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         return await callback.answer("❌ Доступ запрещён", show_alert=True)
     await state.clear()
-    # ✅ ИСПРАВЛЕНО: используем answer() вместо edit_text() для ReplyKeyboardMarkup
     await callback.answer()
     await callback.message.answer("🔙 Возврат в меню", reply_markup=get_admin_keyboard())
 
@@ -704,7 +704,6 @@ async def admin_delete_confirm(callback: types.CallbackQuery):
     pos = int(callback.data.split("_")[2])
     
     if await delete_content_by_position(pos):
-        # ✅ ИСПРАВЛЕНО: используем answer() вместо edit_text() для ReplyKeyboardMarkup
         await callback.answer()
         await callback.message.answer(f"✅ Пост #{pos} удалён!", reply_markup=get_admin_keyboard())
     else:
@@ -876,13 +875,14 @@ async def send_scheduled_content():
     logging.info(f"✅ [JOB END] Отправлено: {sent_count}")
 
 
+# ✅ ИЗМЕНЕНО: убран day_of_week — рассылка каждый день
 async def setup_scheduler():
     hour, minute = await get_schedule()
     scheduler.remove_all_jobs()
     scheduler.add_job(
         send_scheduled_content,
         CronTrigger(
-            day_of_week=SEND_DAYS,
+            # ✅ Убран day_of_week — задача выполняется КАЖДЫЙ день
             hour=hour,
             minute=minute,
             timezone=ZoneInfo(SCHEDULE_TIMEZONE),
